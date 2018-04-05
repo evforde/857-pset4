@@ -6,8 +6,14 @@ from Crypto.Random import random
 import time
 from struct import pack, unpack
 import requests
+from multiprocessing import Pool, Process
+from functools import partial
 
 NODE_URL = "http://6857coin.csail.mit.edu"
+MOD = 2 ** 128
+NCORES = 4
+BLOCK_CONTENTS = "eforde,qpm3,moezinia"
+min_hd = 128
 
 """
     This is a bare-bones miner compatible with 6857coin, minus the final proof of
@@ -24,7 +30,7 @@ NODE_URL = "http://6857coin.csail.mit.edu"
 """
 
 
-def solve_block(b):
+def solve_block(b, core):
     """
     Iterate over random nonce triples until a valid proof of work is found
     for the block
@@ -33,37 +39,79 @@ def solve_block(b):
     timestamp, and root (a hash of the block data).
 
     """
+    global min_hd
+
     d = b["difficulty"]
+    dif = 128 - d
+    print "Looking for hd less than", dif
     while True:
-        b["nonces"] = [rand_nonce() for i in range(3)]
+        b["nonces"] = [rand_nonce(64), rand_nonce(32), rand_nonce(32)]
         #   Compute Ai, Aj, Bi, Bj
         ciphers = compute_ciphers(b)
         #   Parse the ciphers as big-endian unsigned integers
         Ai, Aj, Bi, Bj = [unpack_uint128(cipher) for cipher in ciphers]
-        #   TODO: Verify PoW
+        # Verify PoW
+        bytes1 = (Ai + Bj) % MOD
+        bytes2 = (Aj + Bi) % MOD
+        xor = bytes1 ^ bytes2
+        hd = bin(xor).count('1')
+        if hd < min_hd:
+            min_hd = hd
+            print core, "- New min hd:", min_hd
+            if hd <= dif:
+                print "Found nonces with hd", hd
+                print b["nonces"]
+                return
 
-
+def make_block():
+    """
+    Constructs a block dictionary from /next header information with
+    our usernames as the contents
+    """
+    next_header = get_next()
+    #   Next block's parent, version, difficulty
+    #   Construct a block with our name in the contents that appends to the
+    #   head of the main chain
+    block = {
+        "version": next_header["version"],
+        #   for now, root is hash of block contents (team name)
+        "root": hash_to_hex(BLOCK_CONTENTS),
+        "parentid": next_header["parentid"],
+        #   nanoseconds since unix epoch
+        "timestamp": long(time.time()*1000*1000*1000),
+        "difficulty": next_header["difficulty"]
+    }
+    return block
+ 
 def main():
-    """
-    Repeatedly request next block parameters from the server, then solve a block
-    containing our team name.
+    global min_hd
 
-    We will construct a block dictionary and pass this around to solving and
-    submission functions.
-    """
-    block_contents = "staff"
     while True:
-        #   Next block's parent, version, difficulty
-        next_header = get_next()
-        #   Construct a block with our name in the contents that appends to the
-        #   head of the main chain
-        new_block = make_block(next_header, block_contents)
-        #   Solve the POW
-        print "Solving block..."
-        print new_block
-        solve_block(new_block)
-        #   Send to the server
-        add_block(new_block, block_contents)
+        # Try mining for 60 seconds on each core, then reload 
+        # in case a new block has been added
+        min_hd = 128
+        p = Process(target=spawn_miners)
+        p.start()
+        p.join(60)
+
+def spawn_miners():
+    block = make_block()
+    print "\nSolving block..."
+    print block
+    pool = Pool()
+    block_args = [(block.copy(), i) for i in xrange(NCORES)]
+    results = pool.map_async(try_mine_block, block_args)
+    pool.close()
+    pool.join()
+    print results.get()
+
+
+def try_mine_block((new_block, core)):
+    solve_block(new_block, core)
+    #   Send to the server
+    print core, "- Solved block."
+    add_block(new_block, BLOCK_CONTENTS)
+    return "SUCCESS"
 
 
 def get_next():
@@ -92,7 +140,7 @@ def add_block(h, contents):
     print "Sending block to server..."
     print json.dumps(add_block_request)
     r = requests.post(NODE_URL + "/add", data=json.dumps(add_block_request))
-    print r
+    print r.status_code, r.content
 
 
 def hash_block_to_hex(b):
@@ -172,28 +220,11 @@ def hash_to_hex(data):
     return h.digest().encode('hex')
 
 
-def make_block(next_info, contents):
-    """
-    Constructs a block from /next header information `next_info` and sepcified
-    contents.
-    """
-    block = {
-        "version": next_info["version"],
-        #   for now, root is hash of block contents (team name)
-        "root": hash_to_hex(contents),
-        "parentid": next_info["parentid"],
-        #   nanoseconds since unix epoch
-        "timestamp": long(time.time()*1000*1000*1000),
-        "difficulty": next_info["difficulty"]
-    }
-    return block
-
-
-def rand_nonce():
+def rand_nonce(n):
     """
     Returns a random uint64
     """
-    return random.getrandbits(64)
+    return random.getrandbits(n)
 
 
 if __name__ == "__main__":
