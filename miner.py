@@ -2,7 +2,7 @@ import urllib2
 import json
 from hashlib import sha256 as H
 from Crypto.Cipher import AES
-from Crypto.Random import random
+from Crypto.Random import random, atfork
 import time
 from struct import pack, unpack
 import requests
@@ -30,7 +30,7 @@ min_hd = 128
 """
 
 
-def solve_block(b, core):
+def solve_block(b, seed, seed2, core):
     """
     Iterate over random nonce triples until a valid proof of work is found
     for the block
@@ -43,11 +43,10 @@ def solve_block(b, core):
 
     d = b["difficulty"]
     dif = 128 - d
-    print "Looking for hd less than", dif
     while True:
-        b["nonces"] = [rand_nonce(64), rand_nonce(32), rand_nonce(32)]
+        b["nonces"][2] = rand_nonce(64)
         #   Compute Ai, Aj, Bi, Bj
-        ciphers = compute_ciphers(b)
+        ciphers = compute_ciphers(b, seed, seed2)
         #   Parse the ciphers as big-endian unsigned integers
         Ai, Aj, Bi, Bj = [unpack_uint128(cipher) for cipher in ciphers]
         # Verify PoW
@@ -79,35 +78,35 @@ def make_block():
         "parentid": next_header["parentid"],
         #   nanoseconds since unix epoch
         "timestamp": long(time.time()*1000*1000*1000),
-        "difficulty": next_header["difficulty"]
+        "difficulty": next_header["difficulty"],
+        "nonces": [rand_nonce(64), rand_nonce(64), None]
     }
     return block
  
 def main():
     global min_hd
+    min_hd = 128
 
     while True:
         # Try mining for 60 seconds on each core, then reload 
         # in case a new block has been added
-        min_hd = 128
         p = Process(target=spawn_miners)
         p.start()
         p.join(60)
 
 def spawn_miners():
     block = make_block()
-    print "\nSolving block..."
-    print block
+    print "Looking for hd less than", 128 - block["difficulty"], "for block", block
     pool = Pool()
-    block_args = [(block.copy(), i) for i in xrange(NCORES)]
-    results = pool.map_async(try_mine_block, block_args)
-    pool.close()
-    pool.join()
-    print results.get()
+
+    (seed, seed2) = compute_AES_seeds(block)
+    block_args = [(block.copy(), seed, seed2, i) for i in xrange(NCORES)]
+    results = pool.map(try_mine_block, block_args)
 
 
-def try_mine_block((new_block, core)):
-    solve_block(new_block, core)
+def try_mine_block(args):
+    atfork()
+    solve_block(*args)
     #   Send to the server
     print core, "- Solved block."
     add_block(new_block, BLOCK_CONTENTS)
@@ -170,11 +169,10 @@ def hash_block_to_hex(b):
     return b["hash"]
 
 
-def compute_ciphers(b):
+def compute_AES_seeds(b):
     """
-    Computes the ciphers Ai, Aj, Bi, Bj of a block header.
+    Computes AES ciphers A and B from a block header
     """
-
     packed_data = []
     packed_data.extend(b["parentid"].decode('hex'))
     packed_data.extend(b["root"].decode('hex'))
@@ -194,6 +192,13 @@ def compute_ciphers(b):
     h.update(seed)
     seed2 = h.digest()
 
+    return seed, seed2
+
+def compute_ciphers(b, seed, seed2):
+    """
+    Computes the ciphers Ai, Aj, Bi, Bj of a block header
+    given the seeds of both AES ciphers
+    """
     A = AES.new(seed)
     B = AES.new(seed2)
 
@@ -206,7 +211,6 @@ def compute_ciphers(b):
     Bj = B.encrypt(j)
 
     return Ai, Aj, Bi, Bj
-
 
 def unpack_uint128(x):
     h, l = unpack('>QQ', x)
