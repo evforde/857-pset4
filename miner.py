@@ -11,7 +11,7 @@ from functools import partial
 
 NODE_URL = "http://6857coin.csail.mit.edu"
 MOD = 2 ** 128
-NCORES = 4
+NCORES = 3
 BLOCK_CONTENTS = "eforde,qpm3,moezinia"
 min_hd = 128
 
@@ -43,8 +43,10 @@ def solve_block(b, seed, seed2, core):
 
     d = b["difficulty"]
     dif = 128 - d
+    nonce = rand_nonce(64)
     while True:
-        b["nonces"][2] = rand_nonce(64)
+        b["nonces"][2] = nonce
+        nonce += 1
         #   Compute Ai, Aj, Bi, Bj
         ciphers = compute_ciphers(b, seed, seed2)
         #   Parse the ciphers as big-endian unsigned integers
