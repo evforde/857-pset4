@@ -6,16 +6,9 @@ from Crypto.Random import random
 import time
 from struct import pack, unpack
 import requests
-from multiprocessing import Pool, Process
-from functools import partial
 from scipy.spatial.distance import hamming
 
-
 NODE_URL = "http://6857coin.csail.mit.edu"
-MOD = 2 ** 128
-NCORES = 4
-BLOCK_CONTENTS = "eforde,qpm3,moezinia"
-min_hd = 128
 
 """
     This is a bare-bones miner compatible with 6857coin, minus the final proof of
@@ -32,7 +25,7 @@ min_hd = 128
 """
 
 
-def solve_block(b, core):
+def solve_block(b):
     """
     Iterate over random nonce triples until a valid proof of work is found
     for the block
@@ -41,97 +34,72 @@ def solve_block(b, core):
     timestamp, and root (a hash of the block data).
 
     """
-    global min_hd
-
     d = b["difficulty"]
-    dif = 128 - d
-    print "Looking for hd less than", dif
+    max_hd = 128-d
+    MOD = 2**128
     while True:
-        b["nonces"] = [rand_nonce(64), rand_nonce(64), rand_nonce(64)]
+        b["nonces"] = [rand_nonce() for i in range(3)]
         #   Compute Ai, Aj, Bi, Bj
         ciphers = compute_ciphers(b)
         #   Parse the ciphers as big-endian unsigned integers
         Ai, Aj, Bi, Bj = [unpack_uint128(cipher) for cipher in ciphers]
-        # Verify PoW
-        bytes1 = (Ai + Bj) % MOD
-        bytes2 = (Aj + Bi) % MOD # type LONG
-
-
-        # xor = bytes1 ^ bytes2
-        # print((bytes1), "wenger out")
-        # hd = hamming(list(bytes1), list(bytes2)) * len(bytes1)
-        hd = hamming2(bin(bytes1), bin(bytes2))
-        # print(hd, "wenger in")
-        # hd = bin(xor).count('1')
-        if hd < min_hd:
-            min_hd = hd
-            print core, "- New min hd:", min_hd
-            if hd <= dif:
-                print "Found nonces with hd", hd
-                print b["nonces"]
+        #   TODO: Verify PoW
+        # these are unpacked AES outputs (ciphers) of using nonces as message and key of AES as hash of the bocks
+        i, j = b["nonces"][1], b["nonces"][2]
+        if i != j:
+            bytes1 = (Ai + Bj) % MOD
+            bytes2 = (Aj + Bi) % MOD
+            hd = hamming(bytes1, bytes2)
+            if hd < max_hd:
                 return
 
 
-def hamming2(x, y):
-    """Calculate the Hamming distance between two bit strings"""
-    # assert len(x) == len(y)
-    count,z = 0,int(x,2)^int(y,2)
-    while z:
-        count += 1
-        z &= z-1 # magic!
-    return count
+# {
+#   "id": "b06d3cd2b82f675bb393b6364eb5180a0a694d6d8c57f909447d0345ea856964",
+#   "header": {
+#     "parentid": "158cb88bce624030e00081e3e85a19fe7fa9c6f748dae3a5ed7928c511f767d5",
+#     "root": "7b538882be8aaf30b5b5edb11500cdbd78dd44804b12d7dff1f9e794b8a5350f",
+#     "difficulty": 108,
+#     "timestamp": 1522944534840954185,
+#     "nonces": [
+#       441507584051665729,
+#       2314080862,
+#       2685329542
+#     ],
+#     "version": 0
+#   },
+#   "block": "andrewhe,baula,werryju",
+#   "blockheight": 2017,
+#   "ismainchain": true,
+#   "evermainchain": true,
+#   "totaldiff": 194904,
+#   "timestamp": "2018-04-05T16:08:54.840954185Z"
+# }
 
 
-
-def make_block():
-    """
-    Constructs a block dictionary from /next header information with
-    our usernames as the contents
-    """
-    next_header = get_next()
-    #   Next block's parent, version, difficulty
-    #   Construct a block with our name in the contents that appends to the
-    #   head of the main chain
-    block = {
-        "version": next_header["version"],
-        #   for now, root is hash of block contents (team name)
-        "root": hash_to_hex(BLOCK_CONTENTS),
-        "parentid": next_header["parentid"],
-        #   nanoseconds since unix epoch
-        "timestamp": long(time.time()*1000*1000*1000),
-        "difficulty": next_header["difficulty"]
-    }
-    return block
 
 def main():
-    global min_hd
+    """
+    Repeatedly request next block parameters from the server, then solve a block
+    containing our team name.
+
+    We will construct a block dictionary and pass this around to solving and
+    submission functions.
+    """
+    block_contents = "eforde,qpm3,moezinia"
 
     while True:
-        # Try mining for 60 seconds on each core, then reload
-        # in case a new block has been added
-        min_hd = 128
-        p = Process(target=spawn_miners)
-        p.start()
-        p.join(60)
-
-def spawn_miners():
-    block = make_block()
-    print "\nSolving block..."
-    print block
-    pool = Pool()
-    block_args = [(block.copy(), i) for i in xrange(NCORES)]
-    results = pool.map_async(try_mine_block, block_args)
-    pool.close()
-    pool.join()
-    print results.get()
-
-
-def try_mine_block((new_block, core)):
-    solve_block(new_block, core)
-    #   Send to the server
-    print core, "- Solved block."
-    add_block(new_block, BLOCK_CONTENTS)
-    return "SUCCESS"
+        #   Next block's parent, version, difficulty
+        next_header = get_next()
+        #   Construct a block with our name in the contents that appends to the
+        #   head of the main chain
+        new_block = make_block(next_header, block_contents)
+        #   Solve the POW
+        print "Solving block..."
+        print new_block
+        solve_block(new_block)
+        #   Send to the server
+        add_block(new_block, block_contents)
 
 
 def get_next():
@@ -160,7 +128,7 @@ def add_block(h, contents):
     print "Sending block to server..."
     print json.dumps(add_block_request)
     r = requests.post(NODE_URL + "/add", data=json.dumps(add_block_request))
-    print r.status_code, r.content
+    print r
 
 
 def hash_block_to_hex(b):
@@ -175,6 +143,7 @@ def hash_block_to_hex(b):
     packed_data = []
     packed_data.extend(b["parentid"].decode('hex'))
     packed_data.extend(b["root"].decode('hex'))
+    # big endian unsigned long, 64 bits
     packed_data.extend(pack('>Q', long(b["difficulty"])))
     packed_data.extend(pack('>Q', long(b["timestamp"])))
     #   Bigendian 64bit unsigned
@@ -214,8 +183,8 @@ def compute_ciphers(b):
     h.update(seed)
     seed2 = h.digest()
 
-    A = AES.new(seed, AES.MODE_ECB) # obj = AES.new('Thisisakey123456', AES.MODE_ECB)
-    B = AES.new(seed2, AES.MODE_ECB)
+    A = AES.new(seed)
+    B = AES.new(seed2)
 
     i = pack('>QQ', 0, long(b["nonces"][1]))
     j = pack('>QQ', 0, long(b["nonces"][2]))
@@ -240,11 +209,28 @@ def hash_to_hex(data):
     return h.digest().encode('hex')
 
 
-def rand_nonce(n):
+def make_block(next_info, contents):
+    """
+    Constructs a block from /next header information `next_info` and sepcified
+    contents.
+    """
+    block = {
+        "version": next_info["version"],
+        #   for now, root is hash of block contents (team name)
+        "root": hash_to_hex(contents),
+        "parentid": next_info["parentid"],
+        #   nanoseconds since unix epoch
+        "timestamp": long(time.time()*1000*1000*1000),
+        "difficulty": next_info["difficulty"]
+    }
+    return block
+
+
+def rand_nonce():
     """
     Returns a random uint64
     """
-    return random.getrandbits(n)
+    return random.getrandbits(64)
 
 
 if __name__ == "__main__":
