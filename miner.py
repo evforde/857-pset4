@@ -108,9 +108,10 @@ def spawn_miners():
 
 def try_mine_block(args):
     atfork()
+    new_block = args[0]
     solve_block(*args)
     #   Send to the server
-    print core, "- Solved block."
+    print "- Solved block."
     add_block(new_block, BLOCK_CONTENTS)
     return "SUCCESS"
 
