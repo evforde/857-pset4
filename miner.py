@@ -58,7 +58,7 @@ def solve_block(b, seed, seed2, core):
         hd = bin(xor).count('1')
         if hd < min_hd:
             min_hd = hd
-            print core, "- New min hd:", min_hd
+            # print core, "- New min hd:", min_hd
             if hd <= dif:
                 print "Found nonces with hd", hd
                 print b["nonces"]
@@ -98,7 +98,7 @@ def main():
 
 def spawn_miners():
     block = make_block()
-    print "Looking for hd less than", 128 - block["difficulty"], "for block", block
+    # print "Looking for hd less than", 128 - block["difficulty"], "for block", block
     pool = Pool()
 
     (seed, seed2) = compute_AES_seeds(block)
